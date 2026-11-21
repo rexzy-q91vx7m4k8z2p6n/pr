@@ -1,83 +1,100 @@
 #!/bin/bash
 
-REMOTE_PATH="/var/www/pterodactyl/app/Http/Controllers/Admin/Nests/EggController.php"
-TIMESTAMP=$(date -u +"%Y-%m-%d-%H-%M-%S")
-BACKUP_PATH="${REMOTE_PATH}.bak_${TIMESTAMP}"
+PANEL="${PANEL_DIR:-/var/www/pterodactyl}"
+DIR="$PANEL/app/Http/Controllers/Admin/Nests"
+MAIN="$DIR/EggController.php"
+FILES=(EggController EggShareController EggScriptController EggVariableController)
+TS=$(date +%s)
+MSG="Akses ditolak! Menu Egg hanya dapat digunakan oleh Admin utama (ID 1)."
 
-echo "🚀 Mengunci Edit / Update Egg (Hanya Admin ID 1)..."
+echo "🔧 Memperbaiki & mengunci Egg (hanya Admin ID 1)..."
 
-if [ -f "$REMOTE_PATH" ]; then
-  mv "$REMOTE_PATH" "$BACKUP_PATH"
-  echo "📦 Backup dibuat: $BACKUP_PATH"
+[ -d "$DIR" ] || { echo "❌ Folder tidak ditemukan: $DIR"; exit 1; }
+command -v perl >/dev/null 2>&1 || { echo "❌ perl tidak tersedia"; exit 1; }
+command -v php >/dev/null 2>&1 || { echo "❌ php tidak tersedia"; exit 1; }
+
+is_broken() {
+    [ -f "$1" ] || return 0
+    grep -q "KUNCI TOTAL SEMUA REQUEST EGG" "$1" && return 0
+    grep -q "StoreEggFormRequest" "$1" && return 0
+    grep -q "public function create" "$1" || return 0
+    php -l "$1" >/dev/null 2>&1 || return 0
+    return 1
+}
+
+if is_broken "$MAIN"; then
+    echo "⚠️  EggController saat ini rusak, mencari backup asli..."
+    FOUND=""
+    for B in $(ls -tr "$MAIN".bak_* 2>/dev/null); do
+        if ! is_broken "$B"; then FOUND="$B"; break; fi
+    done
+    if [ -z "$FOUND" ]; then
+        echo "❌ Tidak ada backup EggController yang sehat."
+        echo "   Ambil file aslinya dari paket panel (Pterodactyl release) lalu taruh di:"
+        echo "   $MAIN"
+        exit 1
+    fi
+    [ -f "$MAIN" ] && cp "$MAIN" "$MAIN.broken_$TS"
+    cp "$FOUND" "$MAIN"
+    echo "♻️  EggController dipulihkan dari: $FOUND"
 fi
 
-cat > "$REMOTE_PATH" << 'EOF'
-<?php
+for N in "${FILES[@]}"; do
+    F="$DIR/$N.php"
+    [ -f "$F" ] || continue
+    cp "$F" "$F.bak_lock_$TS"
+done
 
-namespace Pterodactyl\Http\Controllers\Admin\Nests;
-
-use Illuminate\View\View;
-use Illuminate\Http\Request;
-use Illuminate\Http\RedirectResponse;
-use Illuminate\Support\Facades\Auth;
-use Illuminate\View\Factory as ViewFactory;
-use Prologue\Alerts\AlertsMessageBag;
-use Pterodactyl\Http\Controllers\Controller;
-use Pterodactyl\Services\Eggs\EggUpdateService;
-use Pterodactyl\Services\Eggs\EggCreationService;
-use Pterodactyl\Services\Eggs\EggDeletionService;
-use Pterodactyl\Contracts\Repository\EggRepositoryInterface;
-use Pterodactyl\Http\Requests\Admin\Egg\StoreEggFormRequest;
-
-class EggController extends Controller
-{
-    public function __construct(
-        protected AlertsMessageBag $alert,
-        protected EggCreationService $eggCreationService,
-        protected EggDeletionService $eggDeletionService,
-        protected EggRepositoryInterface $repository,
-        protected EggUpdateService $eggUpdateService,
-        protected ViewFactory $view
-    ) {
-        // 🔒 KUNCI TOTAL SEMUA REQUEST EGG
-        $this->middleware(function ($request, $next) {
-            $user = Auth::user();
-
-            if (!$user || (int) $user->id !== 1) {
-                abort(403, '🚫 Akses ditolak! Hanya admin ID 1 yang dapat membuka menu Egg.');
-            }
-
-            return $next($request);
-        });
-    }
-
-    public function view(int $nest, int $egg): View
-    {
-        return $this->view->make('admin.nests.eggs.view', [
-            'egg' => $this->repository->getWithCopyVariables($egg),
-            'nest' => $nest,
-        ]);
-    }
-
-    public function update(StoreEggFormRequest $request, int $nest, int $egg): RedirectResponse
-    {
-        $this->eggUpdateService->handle($egg, $request->normalize());
-        $this->alert->success(trans('admin/eggs.notices.updated'))->flash();
-
-        return redirect()->route('admin.nests.eggs.view', [$nest, $egg]);
-    }
-
-    public function destroy(int $nest, int $egg): RedirectResponse
-    {
-        $this->eggDeletionService->handle($egg);
-        $this->alert->success(trans('admin/eggs.notices.deleted'))->flash();
-
-        return redirect()->route('admin.nests.view', $nest);
-    }
+rollback() {
+    for N in "${FILES[@]}"; do
+        F="$DIR/$N.php"
+        [ -f "$F.bak_lock_$TS" ] && cp "$F.bak_lock_$TS" "$F"
+    done
+    echo "↩️  Dikembalikan ke kondisi sebelum penguncian."
+    exit 1
 }
-EOF
 
-chmod 644 "$REMOTE_PATH"
+GUARD=$(mktemp)
+cat > "$GUARD" <<'PHP'
 
-echo "✅ EGG TERKUNCI TOTAL"
-echo "🔒 Update / Rename / Upload JSON Egg hanya Admin ID 1"
+        // EGG-LOCK
+        if (!auth()->check() || (int) auth()->id() !== 1) {
+            abort(403, '__MSG__');
+        }
+PHP
+MSG="$MSG" perl -0777 -i -pe 'BEGIN{ $m=$ENV{MSG}; } s/__MSG__/$m/g' "$GUARD"
+
+for N in "${FILES[@]}"; do
+    F="$DIR/$N.php"
+    [ -f "$F" ] || continue
+    if grep -q "EGG-LOCK" "$F"; then
+        echo "ℹ️  $N sudah terkunci."
+        continue
+    fi
+    GUARD="$GUARD" perl -0777 -i -pe '
+    BEGIN { open(G, "<", $ENV{GUARD}) or die; local $/; $g = <G>; close G; $g =~ s/^\s+//; $g =~ s/\s+\z//; $g = "        " . $g; }
+    s/(public\s+function\s+(?!__construct\b)\w+\s*\([^)]*\)(?:\s*:\s*[\\\w|?]+)?\s*\{)/$1\n$g\n/g
+    ' "$F"
+    if ! grep -q "EGG-LOCK" "$F"; then
+        echo "⚠️  $N: tidak ada method yang bisa dikunci."
+        continue
+    fi
+    php -l "$F" >/dev/null 2>&1 || { echo "❌ Syntax PHP error di $N."; php -l "$F"; rm -f "$GUARD"; rollback; }
+    echo "🔒 $N terkunci"
+done
+rm -f "$GUARD"
+
+if [ -f "$PANEL/artisan" ]; then
+    cd "$PANEL" || exit 1
+    php artisan optimize:clear >/dev/null 2>&1
+fi
+
+for s in $(systemctl list-units --type=service --no-legend 'php*-fpm*' 2>/dev/null | awk '{print $1}'); do
+    systemctl reload "$s" >/dev/null 2>&1
+done
+
+echo ""
+echo "✅ Selesai. Menu Egg (lihat / edit / upload) hanya bisa dipakai Admin ID 1."
+echo "🚫 Selain ID 1: ditolak dengan pesan \"$MSG\""
+echo ""
+echo "Rollback: cp $MAIN.bak_lock_$TS $MAIN"
