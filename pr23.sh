@@ -101,16 +101,26 @@ rm -f "$NEWM"
 
 grep -qF "$MSG" "$CTRL" || { echo "❌ Gagal mengganti fungsi delete."; rollback; }
 
-if ! grep -q "TYPE_APPLICATION)->get()" "$CTRL"; then
-    OLD='$this->repository->getApplicationKeys($request->user())'
-    read -r -d '' NEWIDX <<'PHP'
-(((int) $request->user()->id === 1) ? \Pterodactyl\Models\ApiKey::query()->where('key_type', \Pterodactyl\Models\ApiKey::TYPE_APPLICATION)->get() : $this->repository->getApplicationKeys($request->user()))
-PHP
-    if grep -qF "$OLD" "$CTRL"; then
-        OLD="$OLD" NEW="$NEWIDX" perl -0777 -i -pe 's/\Q$ENV{OLD}\E/$ENV{NEW}/g' "$CTRL"
-        echo "✅ ID 1 sekarang melihat semua PLTA (agar bisa menghapus milik user lain)"
+ORIGIDX='$this->repository->getApplicationKeys($request->user())'
+OLDADMINIDX='(((int) $request->user()->id === 1) ? \Pterodactyl\Models\ApiKey::query()->where('"'"'key_type'"'"', \Pterodactyl\Models\ApiKey::TYPE_APPLICATION)->get() : $this->repository->getApplicationKeys($request->user()))'
+OWNIDX='\Pterodactyl\Models\ApiKey::query()->where('"'"'key_type'"'"', \Pterodactyl\Models\ApiKey::TYPE_APPLICATION)->where('"'"'user_id'"'"', $request->user()->id)->get()'
+ALLIDX='\Pterodactyl\Models\ApiKey::query()->where('"'"'key_type'"'"', \Pterodactyl\Models\ApiKey::TYPE_APPLICATION)->get()'
+FINALIDX="(((int) \$request->user()->id === 1) ? $ALLIDX : $OWNIDX)"
+
+if grep -qF "$FINALIDX" "$CTRL"; then
+    echo "ℹ️  Daftar PLTA sudah sesuai (ID 1 semua, lainnya milik sendiri)."
+else
+    OLD="$OLDADMINIDX" NEW="$ORIGIDX" perl -0777 -i -pe 's/\Q$ENV{OLD}\E/$ENV{NEW}/g' "$CTRL"
+    OLD="$OWNIDX" NEW="$ORIGIDX" perl -0777 -i -pe 's/\Q$ENV{OLD}\E/$ENV{NEW}/g' "$CTRL"
+    if grep -qF "$ORIGIDX" "$CTRL"; then
+        OLD="$ORIGIDX" NEW="$FINALIDX" perl -0777 -i -pe 's/\Q$ENV{OLD}\E/$ENV{NEW}/g' "$CTRL"
     else
-        echo "⚠️  Daftar key di index() tidak cocok pola, ID 1 hanya melihat PLTA miliknya sendiri."
+        NEW="$FINALIDX" perl -0777 -i -pe 's/(\x27keys\x27\s*=>\s*)[^\n]*?,(\s*\n)/$1$ENV{NEW},$2/' "$CTRL"
+    fi
+    if grep -qF "$FINALIDX" "$CTRL"; then
+        echo "✅ Menu PLTA: ID 1 melihat semua, user lain hanya miliknya sendiri"
+    else
+        echo "⚠️  Daftar key di index() tidak cocok pola, tampilan daftar tidak diubah."
     fi
 fi
 
@@ -148,6 +158,7 @@ echo ""
 echo "✅ Proteksi berhasil dipasang!"
 echo "👤 User biasa: hanya bisa hapus PLTA miliknya sendiri"
 echo "🚫 User biasa hapus PLTA orang lain: ditolak + laporan dikirim ke Telegram"
-echo "👑 ID 1: bisa hapus PLTA siapa saja"
+echo "👑 ID 1: melihat dan bisa hapus PLTA siapa saja"
+echo "📋 Menu PLTA: user lain hanya melihat PLTA miliknya sendiri"
 echo ""
 echo "Rollback: cp $CTRL.bak_$TS $CTRL"
